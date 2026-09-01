@@ -101,9 +101,18 @@ cumplir el "not perfect play" del enunciado. El mecanismo concreto es
 una decisión de diseño del equipo — el enunciado no prescribe ninguno.
 
 **Participant Connection Status**:
-Estado de presencia de un Participant (`CONNECTED` | `DISCONNECTED` |
-`RECONNECTING` | `FORFEITED`), independiente del `MatchStatus` del
-Match. Una desconexión nunca pausa el Match.
+Estado de presencia de un Participant (`PENDING_CONNECTION` |
+`CONNECTED` | `DISCONNECTED` | `RECONNECTING` | `FORFEITED`),
+independiente del `MatchStatus` del Match. `PENDING_CONNECTION` es el
+estado inicial de todo Participant al crearse el Match, hasta su
+primera conexión WebSocket válida — nunca se ha "desconectado", solo
+no ha llegado todavía. Una desconexión (real, tras haber estado
+`CONNECTED`) nunca pausa el Match.
+_Avoid_: tratar "nunca ha conectado" (`PENDING_CONNECTION`) y "se
+desconectó tras conectar" (`DISCONNECTED`) como el mismo estado —
+comparten el mecanismo de Reconnect Window pero no el mensaje al rival
+("esperando al rival…" vs "el rival se ha desconectado…") ni, en
+pruebas, la misma precondición.
 
 **Match Runtime State**:
 Estado efímero en memoria de un Match en curso (balón, palas, tick,
@@ -227,6 +236,27 @@ inmutable a su Ruleset una vez creado; no puede cambiar en `WAITING` ni
   | `FINISHED` | Match Result (`finishReason: FORFEIT`) | Sí | Sí (distinguiendo abandonos) |
   | `ABORTED` | Aborted Match Details (`abortReason: DOUBLE_NO_SHOW \| TECHNICAL_FAILURE \| ADMINISTRATIVE_CANCELLATION`) | No | No |
 
+- Un Match nace `WAITING` con todos sus Participants en
+  `PENDING_CONNECTION`. La simulación puede emitir snapshots desde ese
+  instante, pero el movimiento competitivo (marcador, saque) no arranca
+  hasta que **todos** los Participants hayan estado `CONNECTED` al menos
+  una vez; solo entonces el Match pasa a `IN_PROGRESS`. Si la Reconnect
+  Window de algún Participant en `PENDING_CONNECTION` vence antes de esa
+  primera conexión conjunta, se resuelve como `FORFEIT` (si el resto sí
+  llegó a conectar) o `DOUBLE_NO_SHOW` (si nadie lo hizo) — sin haberse
+  jugado un solo tick competitivo.
+- Dentro de cada tick del bucle de simulación, el orden de resolución es
+  fijo y determinista: (1) aplicar las intenciones de movimiento ya
+  recibidas, (2) avanzar física y detectar puntos, (3) si alguien alcanza
+  el `targetScore`, cerrar `NORMAL_COMPLETION` antes que cualquier otra
+  cosa, (4) solo si no hubo victoria normal en ese tick, evaluar
+  expiraciones de Reconnect Window pendientes. Así, punto ganador y
+  vencimiento de ventana en el mismo tick resuelven siempre a
+  `NORMAL_COMPLETION`, nunca a `FORFEIT`.
+- El cierre de un Match (cualquier estado terminal) pasa por un único
+  punto de escritura (p. ej. `finalizeMatch`), dentro de una transacción
+  con guarda de estado terminal: un Match ya cerrado no vuelve a
+  cambiar de estado, sin importar qué otro evento llegue después.
 - Si vence una **Reconnect Window** sin reconexión, el Participant pasa a
   `outcome = FORFEITED`. En `ARENA_4P`, si tras eso queda un único
   Participant activo, ese recibe `finalRank = 1` y el Match cierra
@@ -331,6 +361,15 @@ inmutable a su Ruleset una vez creado; no puede cambiar en `WAITING` ni
 > **Domain expert:** "No. Mientras se buscan jugadores compatibles eso es
 > una **Matchmaking Queue**, no un Match. El Match nace ya con sus 4
 > Participants asignados, y solo entonces puede estar en `WAITING`."
+
+> **Dev:** "Un Participant que nunca ha abierto WebSocket, ¿está
+> `DISCONNECTED`?"
+> **Domain expert:** "No — `DISCONNECTED` implica que estuvo
+> `CONNECTED` y se cayó. Alguien que aún no ha llegado está
+> `PENDING_CONNECTION`. Comparten el mismo mecanismo de Reconnect
+> Window (ventana, pala congelada, forfeit al vencer), pero son estados
+> distintos porque la UI y las pruebas necesitan distinguir 'esperando
+> al rival' de 'el rival se ha desconectado'."
 
 ## Flagged ambiguities
 
